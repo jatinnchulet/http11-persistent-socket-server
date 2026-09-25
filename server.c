@@ -84,6 +84,21 @@ static int get_query_param(const char *query, const char *key, char *out, size_t
     return 0;
 }
 
+/* Extract Content-Length from headers (returns 0 if absent, -1 if invalid) */
+static int extract_content_length(const char *buf, int hdr_len) {
+    char hdr[4096];
+    if (hdr_len >= (int)sizeof(hdr)) return -1;
+    memcpy(hdr, buf, hdr_len);
+    hdr[hdr_len] = '\0';
+
+    const char *cl = ci_strstr(hdr, "Content-Length:");
+    if (!cl) return 0;
+    cl += 15;
+    while (*cl == ' ' || *cl == '\t') cl++;
+    int len = atoi(cl);
+    return len >= 0 ? len : -1;
+}
+
 /* Send a complete HTTP/1.1 response with proper headers */
 static void send_response(socket_t sock, int status_code, const char *reason_phrase,
                           const char *body, int keep_alive) {
@@ -206,14 +221,60 @@ static void process_request(socket_t sock, const char *headers, int hdr_len,
     send_response(sock, 200, "OK", body_resp, 1);
 }
 
+/* Handle client connection with persistent buffer and pipelining */
 static void handle_client(socket_t client_sock) {
     char buf[BUFFER_SIZE];
-    int n = recv(client_sock, buf, sizeof(buf) - 1, 0);
-    if (n > 0) {
-        buf[n] = '\0';
-        int should_close = 0;
-        process_request(client_sock, buf, n, NULL, 0, &should_close);
+    int buf_len = 0;
+
+    for (;;) {
+        /* Check if a complete request is in the buffer */
+        char *hdr_end = NULL;
+        for (int i = 0; i + 3 < buf_len; i++) {
+            if (buf[i] == '\r' && buf[i+1] == '\n' && buf[i+2] == '\r' && buf[i+3] == '\n') {
+                hdr_end = buf + i;
+                break;
+            }
+        }
+
+        if (hdr_end) {
+            int hdr_len = (int)(hdr_end + 4 - buf);
+            int content_len = extract_content_length(buf, hdr_len);
+            if (content_len < 0) {
+                send_response(client_sock, 400, "Bad Request", "", 0);
+                break;
+            }
+
+            if (buf_len >= hdr_len + content_len) {
+                int total_req_len = hdr_len + content_len;
+                int should_close = 0;
+
+                process_request(client_sock, buf, hdr_len, buf + hdr_len, content_len, &should_close);
+
+                /* Shift remaining bytes in buffer forward */
+                memmove(buf, buf + total_req_len, buf_len - total_req_len);
+                buf_len -= total_req_len;
+
+                if (should_close) break;
+
+                /* Loop back immediately to handle any pipelined requests */
+                continue;
+            }
+        }
+
+        /* Buffer is full without a complete request */
+        if (buf_len >= BUFFER_SIZE - 1) {
+            send_response(client_sock, 400, "Bad Request", "", 0);
+            break;
+        }
+
+        int n = recv(client_sock, buf + buf_len, BUFFER_SIZE - 1 - buf_len, 0);
+        if (n <= 0) {
+            break;
+        }
+        buf_len += n;
+        buf[buf_len] = '\0';
     }
+
     CLOSE_SOCKET(client_sock);
 }
 

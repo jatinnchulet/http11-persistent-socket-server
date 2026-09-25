@@ -132,20 +132,60 @@ int main(int argc, char *argv[]) {
     }
 
     printf("Connected to %s:%d\n", host, port);
+    printf("s = socket.create_connection((\"%s\", %d))\n\n", host, port);
 
-    /* Send test request */
-    const char *test_req = "GET /add?a=2&b=3 HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    send(sock, test_req, (int)strlen(test_req), 0);
+    /* The exact test requests from the course specification */
+    const char *requests[] = {
+        "GET /add?a=2&b=3 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        "GET /sub?a=10&b=4 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        "GET /mul?a=6&b=7 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        "GET /div?a=1&b=0 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        "GET /pow?a=2&b=8 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        "POST /add HTTP/1.1\r\nHost: localhost\r\n\r\n"
+    };
 
-    int status = 0;
-    char body[256] = {0};
-    if (read_http_response(sock, &status, body, sizeof(body))) {
-        printf("Response: %d %s\n", status, body);
+    const char *labels[] = {
+        "GET /add?a=2&b=3",
+        "GET /sub?a=10&b=4",
+        "GET /mul?a=6&b=7",
+        "GET /div?a=1&b=0",
+        "GET /pow?a=2&b=8",
+        "POST /add"
+    };
+
+    int num_requests = sizeof(requests) / sizeof(requests[0]);
+    int successful_responses = 0;
+
+    for (int i = 0; i < num_requests; i++) {
+        /* Send request over the single open socket */
+        int sent = send(sock, requests[i], (int)strlen(requests[i]), 0);
+        if (sent <= 0) {
+            fprintf(stderr, "Error: Socket died when sending '%s'\n", labels[i]);
+            break;
+        }
+
+        /* Read response over the same socket */
+        int status = 0;
+        char body[256] = {0};
+        if (!read_http_response(sock, &status, body, sizeof(body))) {
+            fprintf(stderr, "Error: Socket died when reading response for '%s'\n", labels[i]);
+            break;
+        }
+
+        successful_responses++;
+        if (strlen(body) > 0) {
+            printf("%-20s -> %d %s\n", labels[i], status, body);
+        } else {
+            printf("%-20s -> %d\n", labels[i], status);
+        }
     }
+
+    printf("\nsocket still open: %s\n", (successful_responses == num_requests) ? "True" : "False");
+    printf("1 TCP handshake, %d responses\n", successful_responses);
 
     CLOSE_SOCKET(sock);
 #ifdef _WIN32
     WSACleanup();
 #endif
-    return 0;
+    return (successful_responses == num_requests) ? 0 : 1;
 }
